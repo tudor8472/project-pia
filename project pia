@@ -1,0 +1,301 @@
+#include <Arduino.h>
+#include <BLEDevice.h>
+#include <BLEServer.h>
+#include <BLEUtils.h>
+#include <BLE2902.h>
+#include <ArduinoJson.h>
+#include <WiFi.h>
+#include <HTTPClient.h>
+#if !defined(CONFIG_BT_ENABLED) ||!defined(CONFIG_BLUEDROID_ENABLED)
+ #error Bluetooth is not enabled! Please run `make menuconfig` to and enable it
+#endif
+class Constants{
+public:
+ String ssid = "Android Ap";
+ String password = "qqqqqqqq";
+ String bleServerName = "placuta_esp_32";
+ String service_uuid = "08d4fa30-b468-4911-b9f3-0ba4b65cee0d";
+ String apiListURL = "http://proiectia.bogdanflorea.ro/api/harry-potter/characters";
+ String apiFetchURL = "http://proiectia.bogdanflorea.ro/api/harry-potter/character?id=";
+ String idProperty = "id";
+ String nameProperty = "name";
+ String imageProperty = "pictureUrl";
+ String descriptionProperty = "actor";
+ String descriptionProperty2 = "gender";
+ String descriptionProperty3 = "species";
+ bool deviceConnected = false;
+};
+Constants *constants = new Constants();
+BLECharacteristic indexCharacteristic(
+ constants->service_uuid.c_str(),
+ BLECharacteristic::PROPERTY_READ |
+BLECharacteristic::PROPERTY_WRITE |
+BLECharacteristic::PROPERTY_NOTIFY
+);
+BLECharacteristic detailsCharacteristic(
+ constants->service_uuid.c_str(),
+ BLECharacteristic::PROPERTY_READ |
+BLECharacteristic::PROPERTY_WRITE |
+BLECharacteristic::PROPERTY_NOTIFY
+);
+BLEDescriptor *indexDescriptor = new
+BLEDescriptor(BLEUUID((uint16_t)0x2901));
+BLEDescriptor *detailsDescriptor = new
+BLEDescriptor(BLEUUID((uint16_t)0x2902));
+class Utils{
+public:
+ static DynamicJsonDocument fetchJson(String url){
+ DynamicJsonDocument document(8096);
+ HTTPClient http;
+ String payload;
+ http.begin(url);
+ http.setConnectTimeout(30000);
+ http.setTimeout(30000);
+ http.GET();
+ payload = http.getString();
+ deserializeJson(document, payload);
+ return document;
+ }
+ static DynamicJsonDocument createListDocumentJson(JsonObject object){
+ DynamicJsonDocument listDocumentJson(8096);
+ listDocumentJson["id"] = object[constants->idProperty];
+ listDocumentJson["name"] = object[constants->nameProperty];
+ listDocumentJson["image"] = object[constants->imageProperty];
+ return listDocumentJson;
+ }
+ static DynamicJsonDocument
+createDetailsDocumentJson(DynamicJsonDocument document){
+ DynamicJsonDocument detailsDocumentJson(512);
+ detailsDocumentJson["id"] = document[constants->idProperty];
+ detailsDocumentJson["name"] = document[constants->nameProperty];
+ detailsDocumentJson["image"] = document[constants->imageProperty];
+ detailsDocumentJson["description"] = "Actorul:"+document[constants-
+>descriptionProperty].as<String>() +"\nGen:"+document[constants-
+>descriptionProperty2].as<String>()+"\nSpecie:"+document[constants-
+>descriptionProperty3].as<String>();
+ return detailsDocumentJson;
+ }
+ static void sendJson(DynamicJsonDocument document, BLECharacteristic
+*characteristic){
+ String returned;
+ serializeJson(document, returned);
+ characteristic->setValue(returned.c_str());
+ characteristic->notify();
+ }
+};
+class WiFiConnection{
+protected:
+ String ssid;
+ String password;
+public:
+ WiFiConnection(String ssid, String password, bool begin = true) : ssid(ssid),
+password(password){}
+ void Wificonnect(String ssid, String password, bool begin = true){
+ if(begin){
+ this->connect();
+ }
+ }
+ void setSSID(String ssid){
+ this->ssid = ssid;
+ }
+ void setPassword(String password){
+ this->password = password;
+ }
+ String getSSID(){
+ return this->ssid;
+ }
+ void connect(){
+ WiFi.begin(this->ssid.c_str(), this->password.c_str());
+ }
+ bool isConnected(){
+ if(WiFi.status() == WL_CONNECTED){
+ Serial.println("s-a conectat");
+ return true;
+ }
+ Serial.println("nu s-a conectat");
+ return false;
+ }
+};
+WiFiConnection* WiFiInstance;
+String get_teamid(String JSONString)
+{
+ DynamicJsonDocument JSONDocument(15000);
+ DeserializationError error = deserializeJson(JSONDocument, JSONString.c_str());
+ if (error)
+ {
+ Serial.println(error.c_str());
+ return "";
+ }
+ else
+ {
+ String teamId = JSONDocument["teamId"];
+ return teamId;
+ }
+}
+String TeamID;
+class CharacteristicsCallbacks: public BLECharacteristicCallbacks {
+ void onWrite(BLECharacteristic *characteristic) {
+ DynamicJsonDocument appRequest(512);
+ deserializeJson(appRequest, characteristic->getValue().c_str());
+ if(appRequest["action"]== "getNetworks"){
+ String id;
+ id=characteristic->getValue().c_str();
+ TeamID=get_teamid(id);
+ WiFi.mode(WIFI_STA);
+ WiFi.disconnect();
+ delay(100);
+ Serial.println("\nscan start");
+ int n = WiFi.scanNetworks();
+ if (n == 0)
+ {
+ Serial.println("no networks found");
+ }
+ else
+ {
+ for (int i = 0; i < n; ++i)
+ {
+ DynamicJsonDocument JSONDocument(15000);
+ JSONDocument["ssid"] = WiFi.SSID(i);
+ JSONDocument["strength"] = WiFi.RSSI(i);
+ switch (WiFi.encryptionType(i))
+ {
+ case 4:
+ JSONDocument["encryption"] = "WPA_WPA2_PSK";
+ break;
+ case 3:
+ JSONDocument["encryption"] = "WPA2_PSK";
+ break;
+ case 0:
+ JSONDocument["encryption"] = "open";
+ break;
+ case 1:
+ JSONDocument["encryption"] = "WEP";
+ break;
+ case 2:
+ JSONDocument["encryption"] = "WPA_PSK";
+ break;
+ case 5:
+ JSONDocument["encryption"] = "WPA2_ENTERPRISE";
+ break;
+ default:
+ JSONDocument["encryption"] = "";
+ break;
+ }
+ JSONDocument["teamId"] = TeamID;
+ Utils::sendJson(JSONDocument,characteristic);
+ }
+ }
+}
+if(appRequest["action"]=="connect"){
+ String ssid = "";
+ String password = "";
+ DynamicJsonDocument JSONDocument(15000);
+ deserializeJson(JSONDocument, characteristic->getValue());
+ DynamicJsonDocument JSONDocument_result(15000);
+ ssid = JSONDocument["ssid"].as<String>();
+ password = JSONDocument["password"].as<String>();
+ JSONDocument_result["ssid"] = ssid;
+ const long connection_timeout = 15000;
+ long startConnection = 0;
+ Serial.begin(115200);
+ WiFi.mode(WIFI_STA);
+ WiFi.disconnect();
+ delay(100);
+ WiFi.begin(ssid.c_str(), password.c_str());
+ Serial.println("\nConnecting");
+ startConnection = millis();
+ while (WiFi.status() != WL_CONNECTED)
+ {
+ Serial.print(".");
+ delay(500);
+ }
+ Serial.println("");
+ if (WiFi.status() != WL_CONNECTED)
+ {
+ Serial.println("Connection failed");
+ JSONDocument_result["connected"] = false;
+ }
+ else
+ {
+ JSONDocument_result["connected"] = true;
+ }
+ JSONDocument_result["teamId"] = TeamID;
+ Utils::sendJson(JSONDocument_result,characteristic);
+}
+ if(appRequest["action"] == "getData"){
+ DynamicJsonDocument webJSON = Utils::fetchJson(constants->apiListURL);
+ JsonArray list = webJSON.as<JsonArray>();
+ for (JsonVariant value : list)
+ {
+ JsonObject listItem = value.as<JsonObject>();
+ DynamicJsonDocument JSONDocument_response(4096);
+ JSONDocument_response["id"] = listItem["id"];
+ JSONDocument_response["name"] = listItem["name"];
+ String imageurl = listItem["pictureUrl"];
+ JSONDocument_response["image"] = imageurl.c_str();
+ JSONDocument_response["teamId"]=TeamID;
+ Utils::sendJson(JSONDocument_response,characteristic);
+ }
+ }else if(appRequest["action"] == "getDetails"){
+ DynamicJsonDocument webJSON = Utils::fetchJson(constants->apiFetchURL +
+appRequest["id"].as<String>());
+ DynamicJsonDocument returnJSON = Utils::createDetailsDocumentJson(webJSON);
+ returnJSON["teamId"]=TeamID;
+ Utils::sendJson(returnJSON, characteristic);
+ }
+ }
+};
+class MyServerCallbacks: public BLEServerCallbacks {
+ void onConnect(BLEServer* pServer) {
+ constants->deviceConnected = true;
+ Serial.println("Device connected");
+ };
+ void onDisconnect(BLEServer* pServer) {
+ constants->deviceConnected = false;
+ Serial.println("Device disconnected");
+ }
+};
+class BluetoothConnection{
+protected:
+ BLEServer *pServer;
+ BLEService *bmeService;
+ BLEAdvertising *pAdvertising;
+ String name;
+public:
+ BluetoothConnection(String name, bool begin = true, bool alert = true) : name(name) {
+ if(begin){
+ this->tryPair(alert);
+ }
+ }
+ void tryPair(bool alert = false){
+ BLEDevice::init(this->name.c_str());
+ this->pServer = BLEDevice::createServer();
+ this->pServer->setCallbacks(new MyServerCallbacks());
+ this->bmeService = this->pServer->createService(constants->service_uuid.c_str());
+ this->bmeService->addCharacteristic(&indexCharacteristic);
+ indexDescriptor->setValue("Get data list");
+ indexCharacteristic.addDescriptor(indexDescriptor);
+ indexCharacteristic.setValue("Get data List");
+ indexCharacteristic.setCallbacks(new CharacteristicsCallbacks());
+ this->bmeService->addCharacteristic(&detailsCharacteristic);
+ detailsDescriptor->setValue("Get data details");
+ detailsCharacteristic.addDescriptor(detailsDescriptor);
+ detailsCharacteristic.setValue("Get data details");
+ detailsCharacteristic.setCallbacks(new CharacteristicsCallbacks());
+ this->bmeService->start();
+ this->pAdvertising = BLEDevice::getAdvertising();
+ this->pAdvertising->addServiceUUID(constants->service_uuid.c_str());
+ this->pServer->getAdvertising()->start();
+ if(alert){
+ Serial.println("Waiting a client connection to notify...");
+ }
+ }
+};
+BluetoothConnection* BluetoothInstance;
+void setup() {
+ Serial.begin(115200);
+ WiFiInstance = new WiFiConnection(constants->ssid, constants->password);
+ BluetoothInstance = new BluetoothConnection(constants->bleServerName);
+}
+void loop() {
+}
